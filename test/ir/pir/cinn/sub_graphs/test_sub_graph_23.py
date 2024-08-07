@@ -27,16 +27,12 @@ class LayerCase(paddle.nn.Layer):
     def forward(
         self,
         var_0,  # (shape: [11, 24, 56, 56], dtype: paddle.float32, stop_gradient: False)
-        var_1,  # (shape: [11, 24, 56, 56], dtype: paddle.float32, stop_gradient: False)
     ):
         var_3 = var_0.shape[0]
         var_4 = paddle.tensor.random.rand(shape=[var_3, 1, 1, 1])
         var_5 = 0.975 + var_4
-        var_6 = paddle.tensor.ops.floor(var_5)
-        var_7 = paddle.tensor.math.multiply(var_0, var_6)
-        var_8 = var_7 / 0.975
-        var_9 = paddle.tensor.math.add(var_8, var_1)
-        return var_9
+        var_6 = var_5 * var_0
+        return var_6
 
 
 class TestLayer(TestBase):
@@ -48,17 +44,8 @@ class TestLayer(TestBase):
                 name=None,
                 stop_gradient=False,
             ),
-            InputSpec(
-                shape=(-1, -1, -1, -1),
-                dtype=paddle.float32,
-                name=None,
-                stop_gradient=False,
-            ),
         ]
-        self.inputs = (
-            paddle.rand(shape=[11, 24, 56, 56], dtype=paddle.float32),
-            paddle.rand(shape=[11, 24, 56, 56], dtype=paddle.float32),
-        )
+        self.inputs = (paddle.rand(shape=[1, 1, 1, 1], dtype=paddle.float32),)
         self.net = LayerCase
 
 

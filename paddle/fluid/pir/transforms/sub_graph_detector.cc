@@ -49,7 +49,7 @@
 namespace pir {
 std::vector<pir::Operation*> InverselyTopologicalSort(pir::Block* block) {
   std::vector<pir::Operation*> sort_ops;
-  std::unordered_map<pir::Operation*, int> pending_count;
+  std::unordered_map<pir::Operation*, size_t> pending_count;
   // step 1: initialize pending_cout for defined op
   for (auto& op : *block) {
     if (pending_count.find(&op) == pending_count.end()) {
@@ -106,7 +106,8 @@ std::vector<pir::Operation*> InverselyTopologicalSort(pir::Block* block) {
 }
 
 std::vector<pir::Operation*> GetProducerOpsReverseSort(
-    pir::Operation* op, const std::unordered_map<pir::Operation*, int>& op2id) {
+    pir::Operation* op,
+    const std::unordered_map<pir::Operation*, size_t>& op2index) {
   std::unordered_set<pir::Operation*> producers;
 
   std::vector<pir::Operation*> vec_res;
@@ -119,16 +120,16 @@ std::vector<pir::Operation*> GetProducerOpsReverseSort(
         source_op->GetParent() == op->GetParent()) {
       producers.insert(source_op);
       PADDLE_ENFORCE(
-          op2id.count(source_op),
-          common::errors::PreconditionNotMet("source op MUST in op2id map"));
+          op2index.count(source_op),
+          common::errors::PreconditionNotMet("source op MUST in op2index map"));
       vec_res.emplace_back(source_op);
     }
   }
 
   std::sort(vec_res.begin(),
             vec_res.end(),
-            [&op2id](pir::Operation* a, pir::Operation* b) {
-              return op2id.at(a) > op2id.at(b);
+            [&op2index](pir::Operation* a, pir::Operation* b) {
+              return op2index.at(a) > op2index.at(b);
             });
 
   return vec_res;
@@ -150,14 +151,15 @@ std::unordered_set<pir::Operation*> GetProducerOps(pir::Operation* op) {
 }
 
 std::unordered_set<pir::Operation*> GetConsumerOps(
-    pir::Operation* op, const std::unordered_map<pir::Operation*, int>& op2id) {
+    pir::Operation* op,
+    const std::unordered_map<pir::Operation*, size_t>& op2index) {
   std::unordered_set<pir::Operation*> consumers;
 
   for (auto& result : op->results()) {
     for (auto it = result.use_begin(); it != result.use_end(); ++it) {
       auto parent_op = it->owner();
       while (parent_op) {
-        if (op2id.count(parent_op)) {
+        if (op2index.count(parent_op)) {
           consumers.insert(parent_op);
           break;
         }
@@ -182,7 +184,10 @@ struct SubGraph : public std::enable_shared_from_this<SubGraph> {
   using SubGraphPtr = std::shared_ptr<SubGraph>;
   SubGraph() = delete;
   SubGraph(pir::Operation* op, int id, bool subst)
-      : substitute(subst), min_op_id(id), max_op_id(id), name(UniqueId()) {
+      : substitute(subst),
+        min_op_index(id),
+        max_op_index(id),
+        name(UniqueId()) {
     ops.push_back(op);
   }
 
@@ -218,14 +223,16 @@ struct SubGraph : public std::enable_shared_from_this<SubGraph> {
   std::unordered_set<SubGraphPtr, hash> upstreams;
   std::unordered_set<SubGraphPtr, hash> downstreams;
 
-  bool substitute{true};
-  size_t min_op_id;
-  size_t max_op_id;
+  bool substitute;      // whether this subgraph can be merged
+  size_t min_op_index;  // min topo index of ops in this subgraph
+  size_t max_op_index;  // max topo index of ops in this subgraph
   std::string name;
 };
 using SubGraphPtr = std::shared_ptr<SubGraph>;
 
 void SubGraph::Merge(const SubGraphPtr& other) {
+  // Merge other subgraph into this subgraph:
+  // 1. Inherit its upstreams and downstreams
   SubGraphPtr self = shared_from_this();
   for (const auto& upstream : other->upstreams) {
     if (upstream == self) continue;
@@ -241,14 +248,15 @@ void SubGraph::Merge(const SubGraphPtr& other) {
   }
   upstreams.erase(other);
   downstreams.erase(other);
+  // 2. Merge ops and update min_op_index and max_op_index
   ops.insert(ops.begin(), other->ops.begin(), other->ops.end());
-  min_op_id = std::min(self->min_op_id, other->min_op_id);
-  max_op_id = std::max(self->max_op_id, other->max_op_id);
+  min_op_index = std::min(self->min_op_index, other->min_op_index);
+  max_op_index = std::max(self->max_op_index, other->max_op_index);
 }
 
 bool HasSinkRoute(const SubGraphPtr& source, const SubGraphPtr& target) {
   if (source == target) return true;
-  if (source->min_op_id > target->max_op_id) {
+  if (source->min_op_index > target->max_op_index) {
     return false;
   }
   for (const auto& subgraph : source->downstreams) {
@@ -259,7 +267,7 @@ bool HasSinkRoute(const SubGraphPtr& source, const SubGraphPtr& target) {
 
 bool HasLiftRoute(const SubGraphPtr& source, const SubGraphPtr& target) {
   if (source == target) return true;
-  if (source->max_op_id < target->min_op_id) {
+  if (source->max_op_index < target->min_op_index) {
     return false;
   }
   for (const auto& subgraph : source->upstreams) {
@@ -274,6 +282,10 @@ bool HasRoute(const SubGraphPtr& up, const SubGraphPtr& down) {
 
 bool CanFuseUpstream2Downstream(const SubGraphPtr& upstream,
                                 const SubGraphPtr& downstream) {
+  // Search whether there is a sink route from upstream to downstream
+  // or a lift route from downstream to upstream except direct connection
+  // between upstream and downstream. If so, a circle will be generated after
+  // merging them.
   PADDLE_ENFORCE(upstream->downstreams.count(downstream) &&
                      downstream->upstreams.count(upstream),
                  ::common::errors::InvalidArgument(
@@ -290,6 +302,35 @@ bool CanFuseUpstream2Downstream(const SubGraphPtr& upstream,
     if (HasLiftRoute(subgraph, upstream)) return false;
   }
   return true;
+}
+
+bool ExistCircle(const std::vector<SubGraphPtr>& subgraphs) {
+  const auto& f = [](const std::vector<SubGraphPtr>& subgraphs,
+                     auto get_childs_fn) -> bool {
+    std::unordered_map<SubGraphPtr, std::unordered_set<SubGraphPtr>> visited;
+    std::queue<SubGraphPtr> queue;
+    for (const auto& subgraph : subgraphs) {
+      if (get_childs_fn(subgraph).empty()) {
+        queue.push(subgraph);
+      }
+    }
+    while (!queue.empty()) {
+      auto subgraph = queue.front();
+      queue.pop();
+      for (const auto& child : get_childs_fn(subgraph)) {
+        if (visited.count(subgraph) && visited[subgraph].count(child)) {
+          return true;
+        }
+        visited[subgraph].insert(child);
+        queue.push(child);
+      }
+    }
+    return false;
+  };
+  auto r_subgraphs = subgraphs;
+  std::reverse(r_subgraphs.begin(), r_subgraphs.end());
+  return f(subgraphs, [](const SubGraphPtr& s) { return s->downstreams; }) &&
+         f(r_subgraphs, [](const SubGraphPtr& s) { return s->upstreams; });
 }
 
 class SubgraphDetector {
@@ -309,7 +350,7 @@ class SubgraphDetector {
     return op2subgraph_.at(op);
   }
 
-  std::unordered_map<pir::Operation*, int> op2id_;
+  std::unordered_map<pir::Operation*, size_t> op2index_;
   std::vector<pir::Operation*> sort_ops_;
   std::unordered_map<pir::Operation*, SubGraphPtr> op2subgraph_;
 };
@@ -318,16 +359,16 @@ SubgraphDetector::SubgraphDetector(pir::Block* block,
                                    const OpClassifier& classifier) {
   // init sort_ops_ in reverse topo order
   sort_ops_ = InverselyTopologicalSort(block);
-  // init op2id_ in topo order
-  int index = 0;
+  // init op2index_ in topo order
+  size_t index = 0;
   for (auto& op : *block) {
     VLOG(4) << index << " " << OpsDebugStr({&op});
-    op2id_[&op] = index++;
+    op2index_[&op] = index++;
   }
   // construct subgraphs and upstream/downstream relation
   for (const auto& op : sort_ops_) {
     bool substitute = classifier(*op);
-    auto subgraph = std::make_shared<SubGraph>(op, op2id_[op], substitute);
+    auto subgraph = std::make_shared<SubGraph>(op, op2index_[op], substitute);
     op2subgraph_[op] = subgraph;
   }
   for (const auto& op : sort_ops_) {
@@ -337,7 +378,7 @@ SubgraphDetector::SubgraphDetector(pir::Block* block,
       subgraph->upstreams.insert(op2subgraph_[producer]);
       op2subgraph_[producer]->downstreams.insert(subgraph);
     }
-    for (const auto& consumer : GetConsumerOps(op, op2id_)) {
+    for (const auto& consumer : GetConsumerOps(op, op2index_)) {
       if (!op2subgraph_.count(consumer)) continue;
       subgraph->downstreams.insert(op2subgraph_[consumer]);
       op2subgraph_[consumer]->upstreams.insert(subgraph);
@@ -350,7 +391,7 @@ void SubgraphDetector::SubgraphFusion() {
   for (const auto& op : sort_ops_) {
     auto downstream = GetOpSubgraph(op);
     if (!downstream->substitute) continue;
-    for (const auto& producer : GetProducerOpsReverseSort(op, op2id_)) {
+    for (const auto& producer : GetProducerOpsReverseSort(op, op2index_)) {
       auto upstream = GetOpSubgraph(producer);
       if (upstream == downstream || !upstream->substitute) continue;
       if (CanFuseUpstream2Downstream(upstream, downstream)) {
@@ -365,10 +406,12 @@ void SubgraphDetector::SubgraphFusion() {
   for (const auto& op : sort_ops_) {
     auto subgraph = GetOpSubgraph(op);
     if (!subgraph->substitute) continue;
-    for (auto producer : GetProducerOpsReverseSort(op, op2id_)) {
-      for (auto consumer : GetConsumerOps(producer, op2id_)) {
+    for (auto producer : GetProducerOpsReverseSort(op, op2index_)) {
+      if (GetOpSubgraph(producer) == subgraph) continue;
+      for (auto consumer : GetConsumerOps(producer, op2index_)) {
         auto brother = GetOpSubgraph(consumer);
         if (brother == subgraph || !brother->substitute) continue;
+        // Brother subgraphs can be merged when there is no route between them
         if (!HasRoute(subgraph, brother) && !HasRoute(brother, subgraph)) {
           subgraph->Merge(brother);
           for (auto brother_op : brother->ops) {
@@ -381,6 +424,7 @@ void SubgraphDetector::SubgraphFusion() {
 }
 
 std::vector<GroupOpsVec> SubgraphDetector::BuildGroups() {
+  // 1. Get subgraph list in topo order
   std::unordered_set<SubGraphPtr> subgraph_set;
   std::vector<SubGraphPtr> subgraph_list;
   for (auto op : sort_ops_) {
@@ -391,7 +435,12 @@ std::vector<GroupOpsVec> SubgraphDetector::BuildGroups() {
   }
   std::reverse(subgraph_list.begin(), subgraph_list.end());
   VLOG(4) << "Subgraph list size: " << subgraph_list.size();
+  PADDLE_ENFORCE_EQ(
+      ExistCircle(subgraph_list),
+      false,
+      ::common::errors::PreconditionNotMet("Detected circle in graph."));
 
+  // 2. Build group ops in subgraph which can be substituted
   std::vector<GroupOpsVec> groups;
   for (const auto& subgraph : subgraph_list) {
     if (!subgraph->substitute) {
@@ -403,7 +452,7 @@ std::vector<GroupOpsVec> SubgraphDetector::BuildGroups() {
     std::sort(group_ops.begin(),
               group_ops.end(),
               [this](pir::Operation* a, pir::Operation* b) {
-                return this->op2id_.at(a) < this->op2id_.at(b);
+                return this->op2index_.at(a) < this->op2index_.at(b);
               });
     groups.push_back(group_ops);
   }

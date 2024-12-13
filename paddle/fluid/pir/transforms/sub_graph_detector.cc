@@ -184,38 +184,48 @@ struct SubGraph : public std::enable_shared_from_this<SubGraph> {
   using SubGraphPtr = std::shared_ptr<SubGraph>;
   SubGraph() = delete;
   SubGraph(pir::Operation* op, int id, bool subst)
-      : substitute(subst),
-        min_op_index(id),
-        max_op_index(id),
-        name(UniqueId()) {
+      : substitute(subst), min_op_index(id), max_op_index(id), id(UniqueId()) {
     ops.push_back(op);
   }
 
   void Merge(const SubGraphPtr& other);
 
-  static std::string UniqueId() {
+  static size_t UniqueId() {
     static std::atomic<size_t> counter{0};
-    return std::string("Subgraph_") + std::to_string(counter++);
+    return counter++;
   }
 
-  std::string DebugStr() const {
+  template <typename V>
+  static std::string JointName(const V& subgraphs) {
     std::stringstream ss;
-    ss << name << " (substitute=" << substitute << ")";
-    ss << "\nupstream: ";
-    for (const auto& subgraph : upstreams) {
-      ss << subgraph->name << ", ";
+    for (const auto& subgraph : subgraphs) {
+      ss << subgraph->name() << ", ";
     }
-    ss << "\ndownstream: ";
-    for (const auto& subgraph : downstreams) {
-      ss << subgraph->name << ", ";
-    }
-    ss << "\n" << OpsDebugStr(ops);
+    auto str = ss.str();
+    return str.empty() ? str : str.substr(0, str.size() - 2);
+  }
+
+  std::string DebugStr(bool print_ops = false) const {
+    std::stringstream ss;
+    ss << name() << " (substitute=" << substitute << ")\n";
+    if (print_ops) ss << OpsDebugStr(ops);
+    ss << "upstream: " << JointName(upstreams);
+    ss << "\ndownstream: " << JointName(downstreams);
     return ss.str();
+  }
+
+  std::string name() const {
+    return std::string("Subgraph_") + std::to_string(id);
   }
 
   struct hash {
     size_t operator()(const SubGraphPtr& subgraph) const {
-      return std::hash<std::string>()(subgraph->name);
+      return std::hash<size_t>()(subgraph->id);
+    }
+  };
+  struct compare {
+    bool operator()(const SubGraphPtr& lhs, const SubGraphPtr& rhs) const {
+      return lhs->id < rhs->id;
     }
   };
 
@@ -226,7 +236,7 @@ struct SubGraph : public std::enable_shared_from_this<SubGraph> {
   bool substitute;      // whether this subgraph can be merged
   size_t min_op_index;  // min topo index of ops in this subgraph
   size_t max_op_index;  // max topo index of ops in this subgraph
-  std::string name;
+  size_t id;
 };
 using SubGraphPtr = std::shared_ptr<SubGraph>;
 
@@ -304,33 +314,48 @@ bool CanFuseUpstream2Downstream(const SubGraphPtr& upstream,
   return true;
 }
 
-bool ExistCircle(const std::vector<SubGraphPtr>& subgraphs) {
-  const auto& f = [](const std::vector<SubGraphPtr>& subgraphs,
-                     auto get_childs_fn) -> bool {
-    std::unordered_map<SubGraphPtr, std::unordered_set<SubGraphPtr>> visited;
-    std::queue<SubGraphPtr> queue;
-    for (const auto& subgraph : subgraphs) {
-      if (get_childs_fn(subgraph).empty()) {
-        queue.push(subgraph);
-      }
-    }
-    while (!queue.empty()) {
-      auto subgraph = queue.front();
-      queue.pop();
-      for (const auto& child : get_childs_fn(subgraph)) {
-        if (visited.count(subgraph) && visited[subgraph].count(child)) {
-          return true;
+void CheckCirclesInSubgraphs(const std::vector<SubGraphPtr>& subgraph_list) {
+  std::set<SubGraphPtr, SubGraph::compare> subgraph_set(subgraph_list.begin(),
+                                                        subgraph_list.end());
+  std::unordered_map<SubGraphPtr, size_t> in_degree;
+  std::unordered_map<SubGraphPtr, size_t> out_degree;
+  for (const auto& subgraph : subgraph_set) {
+    in_degree[subgraph] = subgraph->upstreams.size();
+    out_degree[subgraph] = subgraph->downstreams.size();
+  }
+  // Recursively remove nodes with in_degree or out_degree = 0
+  bool erase_flag = true;
+  while (erase_flag) {
+    erase_flag = false;
+    for (const auto& subgraph : subgraph_list) {
+      if (subgraph_set.count(subgraph) == 0) continue;
+      if (in_degree[subgraph] == 0) {
+        for (const auto& downstream : subgraph->downstreams) {
+          in_degree[downstream]--;
         }
-        visited[subgraph].insert(child);
-        queue.push(child);
+        subgraph_set.erase(subgraph);
+        erase_flag = true;
+        continue;
+      }
+      if (out_degree[subgraph] == 0) {
+        for (const auto& upstream : subgraph->upstreams) {
+          out_degree[upstream]--;
+        }
+        subgraph_set.erase(subgraph);
+        erase_flag = true;
+        continue;
       }
     }
-    return false;
-  };
-  auto r_subgraphs = subgraphs;
-  std::reverse(r_subgraphs.begin(), r_subgraphs.end());
-  return f(subgraphs, [](const SubGraphPtr& s) { return s->downstreams; }) &&
-         f(r_subgraphs, [](const SubGraphPtr& s) { return s->upstreams; });
+  }
+  if (subgraph_set.empty()) return;
+  // If subgraph_set is not empty, there are circles in the subgraphs.
+  auto circle_size = subgraph_set.size();
+  std::stringstream ss;
+  for (const auto& subgraph : subgraph_set) {
+    ss << subgraph->DebugStr() << "\n";
+  }
+  PADDLE_THROW(::common::errors::PreconditionNotMet(
+      "Circles detected in subgraphs (size=%d): \n%s", circle_size, ss.str()));
 }
 
 class SubgraphDetector {
@@ -421,13 +446,20 @@ void SubgraphDetector::SubgraphFusion() {
       }
     }
   }
+  std::unordered_set<SubGraphPtr> subgraph_set;
+  for (const auto& op : sort_ops_) {
+    SubGraphPtr subgraph = GetOpSubgraph(op);
+    if (subgraph_set.count(subgraph)) continue;
+    subgraph_set.insert(subgraph);
+    VLOG(4) << subgraph->DebugStr();
+  }
 }
 
 std::vector<GroupOpsVec> SubgraphDetector::BuildGroups() {
   // 1. Get subgraph list in topo order
   std::unordered_set<SubGraphPtr> subgraph_set;
   std::vector<SubGraphPtr> subgraph_list;
-  for (auto op : sort_ops_) {
+  for (const auto& op : sort_ops_) {
     SubGraphPtr subgraph = GetOpSubgraph(op);
     if (subgraph_set.count(subgraph)) continue;
     subgraph_set.insert(subgraph);
@@ -435,10 +467,7 @@ std::vector<GroupOpsVec> SubgraphDetector::BuildGroups() {
   }
   std::reverse(subgraph_list.begin(), subgraph_list.end());
   VLOG(4) << "Subgraph list size: " << subgraph_list.size();
-  PADDLE_ENFORCE_EQ(
-      ExistCircle(subgraph_list),
-      false,
-      ::common::errors::PreconditionNotMet("Detected circle in graph."));
+  CheckCirclesInSubgraphs(subgraph_list);
 
   // 2. Build group ops in subgraph which can be substituted
   std::vector<GroupOpsVec> groups;

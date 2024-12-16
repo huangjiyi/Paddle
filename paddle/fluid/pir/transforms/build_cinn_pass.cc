@@ -28,6 +28,8 @@ using CompatibleInfo = cinn::hlir::framework::pir::CompatibleInfo;
 
 void VerifyOperationOrder(const pir::Block& block);
 
+std::string FormatDuration(std::chrono::milliseconds ms);
+
 class BuildCinnPass : public pir::Pass {
  public:
   BuildCinnPass() : pir::Pass("build_cinn_pass", /*opt_level=*/1) {}
@@ -48,6 +50,7 @@ class BuildCinnPass : public pir::Pass {
 
  private:
   void ProcessBlock(pir::Block* block) {
+    auto start_t = std::chrono::high_resolution_clock::now();
     std::vector<GroupOpsVec> groups =
         ::pir::DetectSubGraphs(block, CompatibleInfo::IsSupportForCinn);
     AddStatistics(groups.size());
@@ -58,6 +61,11 @@ class BuildCinnPass : public pir::Pass {
       VLOG(4) << "current group_ops.size(): " << group_ops.size();
       ::pir::ReplaceWithGroupOp(block, group_ops);
     }
+    auto end_t = std::chrono::high_resolution_clock::now();
+    auto duration =
+        std::chrono::duration_cast<std::chrono::milliseconds>(end_t - start_t);
+    VLOG(1) << "Time of building group ops (size=" << block->size()
+            << "): " << FormatDuration(duration);
   }
 };
 
@@ -130,6 +138,17 @@ void VerifyOperationOrder(const pir::Block& block) {
       CheckOpOrder(&op);
     }
   }
+}
+
+std::string FormatDuration(std::chrono::milliseconds ms) {
+  auto minutes = std::chrono::duration_cast<std::chrono::minutes>(ms);
+  ms -= std::chrono::duration_cast<std::chrono::milliseconds>(minutes);
+  auto seconds = std::chrono::duration_cast<std::chrono::seconds>(ms);
+  ms -= std::chrono::duration_cast<std::chrono::milliseconds>(seconds);
+  std::stringstream ss;
+  ss << minutes.count() << " min " << seconds.count() << " s " << ms.count()
+     << " ms";
+  return ss.str();
 }
 
 }  // namespace

@@ -207,7 +207,11 @@ struct SubGraph : public std::enable_shared_from_this<SubGraph> {
 
   std::string DebugStr(bool print_ops = false) const {
     std::stringstream ss;
-    ss << name() << " (substitute=" << substitute << ")\n";
+    ss << "=========================================\n";
+    ss << name() << " (substitute=" << substitute << ", "
+       << "min=" << min_op_index << ", "
+       << "max=" << max_op_index << ", "
+       << "size=" << ops.size() << ")\n";
     if (print_ops) ss << OpsDebugStr(ops);
     ss << "upstream: " << JointName(upstreams);
     ss << "\ndownstream: " << JointName(downstreams);
@@ -243,6 +247,8 @@ using SubGraphPtr = std::shared_ptr<SubGraph>;
 void SubGraph::Merge(const SubGraphPtr& other) {
   // Merge other subgraph into this subgraph:
   // 1. Inherit its upstreams and downstreams
+  VLOG(4) << "Merging : " << other->DebugStr();
+  VLOG(4) << "Into : " << DebugStr();
   SubGraphPtr self = shared_from_this();
   for (const auto& upstream : other->upstreams) {
     if (upstream == self) continue;
@@ -262,26 +268,43 @@ void SubGraph::Merge(const SubGraphPtr& other) {
   ops.insert(ops.begin(), other->ops.begin(), other->ops.end());
   min_op_index = std::min(self->min_op_index, other->min_op_index);
   max_op_index = std::max(self->max_op_index, other->max_op_index);
+  VLOG(4) << "Merged : " << DebugStr();
 }
 
 bool HasSinkRoute(const SubGraphPtr& source, const SubGraphPtr& target) {
   if (source == target) return true;
-  if (source->min_op_index > target->max_op_index) {
-    return false;
-  }
-  for (const auto& subgraph : source->downstreams) {
-    if (HasSinkRoute(subgraph, target)) return true;
+  std::unordered_set<SubGraphPtr> visited;
+  std::queue<SubGraphPtr> queue;
+  queue.push(source);
+  while (!queue.empty()) {
+    SubGraphPtr cur = queue.front();
+    queue.pop();
+    visited.insert(cur);
+    if (cur == target) return true;
+    if (cur->min_op_index > target->max_op_index) continue;
+    for (const auto& subgraph : cur->downstreams) {
+      if (visited.count(subgraph)) continue;
+      queue.push(subgraph);
+    }
   }
   return false;
 }
 
 bool HasLiftRoute(const SubGraphPtr& source, const SubGraphPtr& target) {
   if (source == target) return true;
-  if (source->max_op_index < target->min_op_index) {
-    return false;
-  }
-  for (const auto& subgraph : source->upstreams) {
-    if (HasLiftRoute(subgraph, target)) return true;
+  std::unordered_set<SubGraphPtr> visited;
+  std::queue<SubGraphPtr> queue;
+  queue.push(source);
+  while (!queue.empty()) {
+    SubGraphPtr cur = queue.front();
+    queue.pop();
+    visited.insert(cur);
+    if (cur == target) return true;
+    if (source->max_op_index < target->min_op_index) continue;
+    for (const auto& subgraph : cur->upstreams) {
+      if (visited.count(subgraph)) continue;
+      queue.push(subgraph);
+    }
   }
   return false;
 }
@@ -292,10 +315,6 @@ bool HasRoute(const SubGraphPtr& up, const SubGraphPtr& down) {
 
 bool CanFuseUpstream2Downstream(const SubGraphPtr& upstream,
                                 const SubGraphPtr& downstream) {
-  // Search whether there is a sink route from upstream to downstream
-  // or a lift route from downstream to upstream except direct connection
-  // between upstream and downstream. If so, a circle will be generated after
-  // merging them.
   PADDLE_ENFORCE(upstream->downstreams.count(downstream) &&
                      downstream->upstreams.count(upstream),
                  ::common::errors::InvalidArgument(
@@ -314,7 +333,8 @@ bool CanFuseUpstream2Downstream(const SubGraphPtr& upstream,
   return true;
 }
 
-void CheckCirclesInSubgraphs(const std::vector<SubGraphPtr>& subgraph_list) {
+std::optional<std::string> DetectCirclesInSubgraphs(
+    const std::vector<SubGraphPtr>& subgraph_list) {
   std::set<SubGraphPtr, SubGraph::compare> subgraph_set(subgraph_list.begin(),
                                                         subgraph_list.end());
   std::unordered_map<SubGraphPtr, size_t> in_degree;
@@ -347,15 +367,15 @@ void CheckCirclesInSubgraphs(const std::vector<SubGraphPtr>& subgraph_list) {
       }
     }
   }
-  if (subgraph_set.empty()) return;
+  if (subgraph_set.empty()) return std::nullopt;
   // If subgraph_set is not empty, there are circles in the subgraphs.
   auto circle_size = subgraph_set.size();
   std::stringstream ss;
+  ss << "Circles detected in subgraphs (size=" << circle_size << "): \n";
   for (const auto& subgraph : subgraph_set) {
     ss << subgraph->DebugStr() << "\n";
   }
-  PADDLE_THROW(::common::errors::PreconditionNotMet(
-      "Circles detected in subgraphs (size=%d): \n%s", circle_size, ss.str()));
+  return std::make_optional(ss.str());
 }
 
 class SubgraphDetector {
@@ -367,6 +387,8 @@ class SubgraphDetector {
   std::vector<GroupOpsVec> BuildGroups();
 
  private:
+  void ReorderIndexOfSubgraphs();
+
   SubGraphPtr GetOpSubgraph(pir::Operation* op) {
     PADDLE_ENFORCE(
         op2subgraph_.count(op),
@@ -375,10 +397,48 @@ class SubgraphDetector {
     return op2subgraph_.at(op);
   }
 
+  void PrintSubgraphs() {
+    if (VLOG_IS_ON(4)) {
+      VLOG(4) << "\nPrint subgraphs: ";
+      std::unordered_set<SubGraphPtr> subgraph_set;
+      for (const auto& op : sort_ops_) {
+        SubGraphPtr subgraph = GetOpSubgraph(op);
+        if (subgraph_set.count(subgraph)) continue;
+        subgraph_set.insert(subgraph);
+        VLOG(4) << subgraph->DebugStr();
+      }
+    }
+  }
+
   std::unordered_map<pir::Operation*, size_t> op2index_;
   std::vector<pir::Operation*> sort_ops_;
   std::unordered_map<pir::Operation*, SubGraphPtr> op2subgraph_;
 };
+
+void SubgraphDetector::ReorderIndexOfSubgraphs() {
+  // After merging subgraphs with direct relation, brother subgraphs with
+  // indirect relation may not be detected by index order. So we need to
+  // reorder the index of subgraphs in topological order.
+  int index = 0;
+  std::queue<SubGraphPtr> queue;
+  std::map<SubGraphPtr, int> in_degree;
+  for (auto it = sort_ops_.rbegin(); it != sort_ops_.rend(); ++it) {
+    auto subgraph = GetOpSubgraph(*it);
+    if (in_degree.count(subgraph)) continue;
+    in_degree[subgraph] = subgraph->upstreams.size();
+    if (in_degree[subgraph] == 0) queue.push(subgraph);
+  }
+  while (!queue.empty()) {
+    auto subgraph = queue.front();
+    queue.pop();
+    subgraph->min_op_index = index;
+    subgraph->max_op_index = index++;
+    for (const auto& downstream : subgraph->downstreams) {
+      in_degree[downstream]--;
+      if (in_degree[downstream] == 0) queue.push(downstream);
+    }
+  }
+}
 
 SubgraphDetector::SubgraphDetector(pir::Block* block,
                                    const OpClassifier& classifier) {
@@ -391,10 +451,12 @@ SubgraphDetector::SubgraphDetector(pir::Block* block,
     op2index_[&op] = index++;
   }
   // construct subgraphs and upstream/downstream relation
+  std::vector<SubGraphPtr> subgraph_list;
   for (const auto& op : sort_ops_) {
     bool substitute = classifier(*op);
     auto subgraph = std::make_shared<SubGraph>(op, op2index_[op], substitute);
     op2subgraph_[op] = subgraph;
+    subgraph_list.push_back(subgraph);
   }
   for (const auto& op : sort_ops_) {
     auto subgraph = op2subgraph_[op];
@@ -409,9 +471,18 @@ SubgraphDetector::SubgraphDetector(pir::Block* block,
       op2subgraph_[consumer]->upstreams.insert(subgraph);
     }
   }
+  auto circle_info = DetectCirclesInSubgraphs(subgraph_list);
+  if (circle_info) {
+    PADDLE_THROW(::common::errors::PreconditionNotMet(
+        "Before building groups: %s", circle_info.value()));
+  }
+  PrintSubgraphs();
 }
 
 void SubgraphDetector::SubgraphFusion() {
+  // Two subgraphs can be merged only if they have no route except direct
+  // connection between them (brother subgraphs should have no any route),
+  // otherwise a circle will be formed after merging them.
   VLOG(4) << "Merge subgraphs with direct relation";
   for (const auto& op : sort_ops_) {
     auto downstream = GetOpSubgraph(op);
@@ -427,6 +498,7 @@ void SubgraphDetector::SubgraphFusion() {
       }
     }
   }
+  ReorderIndexOfSubgraphs();
   VLOG(4) << "Merge brother subgraphs with same upstream";
   for (const auto& op : sort_ops_) {
     auto subgraph = GetOpSubgraph(op);
@@ -436,22 +508,15 @@ void SubgraphDetector::SubgraphFusion() {
       for (auto consumer : GetConsumerOps(producer, op2index_)) {
         auto brother = GetOpSubgraph(consumer);
         if (brother == subgraph || !brother->substitute) continue;
-        // Brother subgraphs can be merged when there is no route between them
         if (!HasRoute(subgraph, brother) && !HasRoute(brother, subgraph)) {
           subgraph->Merge(brother);
           for (auto brother_op : brother->ops) {
             op2subgraph_[brother_op] = subgraph;
           }
+          ReorderIndexOfSubgraphs();
         }
       }
     }
-  }
-  std::unordered_set<SubGraphPtr> subgraph_set;
-  for (const auto& op : sort_ops_) {
-    SubGraphPtr subgraph = GetOpSubgraph(op);
-    if (subgraph_set.count(subgraph)) continue;
-    subgraph_set.insert(subgraph);
-    VLOG(4) << subgraph->DebugStr();
   }
 }
 
@@ -466,8 +531,11 @@ std::vector<GroupOpsVec> SubgraphDetector::BuildGroups() {
     subgraph_list.push_back(subgraph);
   }
   std::reverse(subgraph_list.begin(), subgraph_list.end());
-  VLOG(4) << "Subgraph list size: " << subgraph_list.size();
-  CheckCirclesInSubgraphs(subgraph_list);
+  auto circle_info = DetectCirclesInSubgraphs(subgraph_list);
+  if (circle_info) {
+    PADDLE_THROW(::common::errors::PreconditionNotMet(
+        "After building groups: %s", circle_info.value()));
+  }
 
   // 2. Build group ops in subgraph which can be substituted
   std::vector<GroupOpsVec> groups;

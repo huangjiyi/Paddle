@@ -240,9 +240,10 @@ void RunReturnInstr(const std::shared_ptr<ReturnInstr>& instr,
       }
       if (AnyFirstInSecond(load_tensor_names, interpreter->global_var_names)) {
         interpreter->ret_expr.push_back(
-            ExprTransformerUtils::InsertIfForAppendVarsTransformer()(expr));
+            ExprTransformerUtils::EliminateUselessIfTransformer()(expr));
       } else {
-        interpreter->ret_expr.push_back(expr);
+        interpreter->ret_expr.push_back(
+            ExprTransformerUtils::RemoveAllAppendIfTransformer()(expr));
       }
     }
   }

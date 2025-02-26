@@ -18,6 +18,7 @@
 #include "paddle/cinn/operator_fusion/fusion_tracker/tracker.h"
 #include "paddle/cinn/operator_fusion/pattern.h"
 #include "paddle/cinn/operator_fusion/pattern_fuser.h"
+#include "paddle/fluid/pir/dialect/operator/trait/inplace.h"
 
 namespace cinn::fusion {
 
@@ -42,9 +43,10 @@ struct FusionInterpreter {
       : tracker(tracker),
         initialized_lowered_op(init_fusible_op),
         substitute_dimexpr_map(dimexpr_map) {
+    auto output_ops = GetGroupOutputOps(ops);
     for (size_t i = 0; i < ops.size(); i++) {
-      if (ops[i]->name() == "cinn_op.yield_store" ||
-          ops[i]->name() == "pd_op.assign_out_") {
+      if (output_ops.count(ops[i]) ||
+          ops[i]->HasTrait<paddle::dialect::InplaceTrait>()) {
         global_var_names.push_back(GetOutputTensor(init_fusible_op[i])->name);
       }
     }

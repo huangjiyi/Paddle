@@ -18,6 +18,28 @@
 
 namespace cinn::fusion {
 
+std::unordered_set<pir::Operation*> GetGroupOutputOps(
+    const std::vector<pir::Operation*>& ops) {
+  auto ops_set = ToUnorderedSet(ops);
+  std::unordered_set<pir::Operation*> output_ops;
+  for (auto* op : ops) {
+    for (size_t i = 0; i < op->num_results(); ++i) {
+      auto result = op->result(i);
+      if (!result) continue;
+      for (auto use_iter = result.use_begin(); use_iter != result.use_end();
+           ++use_iter) {
+        auto* use_op = use_iter->owner();
+        if (ops_set.find(use_op) == ops_set.end()) {
+          output_ops.insert(op);
+          break;
+        }
+      }
+      if (output_ops.count(op)) break;
+    }
+  }
+  return output_ops;
+}
+
 std::vector<int64_t> GetInt64ArrayAttributeData(
     const ::pir::Attribute& attr_val) {
   PADDLE_ENFORCE_EQ(attr_val.isa<::pir::ArrayAttribute>(),

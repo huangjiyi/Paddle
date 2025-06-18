@@ -17,6 +17,9 @@
 #include "paddle/fluid/framework/new_executor/garbage_collector/event_garbage_collector.h"
 #include "paddle/fluid/framework/new_executor/garbage_collector/fast_garbage_collector.h"
 #include "paddle/fluid/framework/new_executor/garbage_collector/no_event_garbage_collector.h"
+#include "paddle/fluid/framework/new_executor/garbage_collector/async_fast_garbage_collector.h"
+
+COMMON_DECLARE_bool(enable_async_fast_gc);
 
 namespace paddle::framework {
 
@@ -32,8 +35,13 @@ CreateInterpreterCoreGarbageCollector(
     const std::vector<std::unique_ptr<InstructionBase>>& vec_instruction) {
   if (phi::is_gpu_place(place)) {
     if (IsInterpretercoreFastGCEnabled()) {  // NOLINT
-      return std::unique_ptr<InterpreterCoreGarbageCollector>(
-          new InterpreterCoreFastGarbageCollector());
+      if (FLAGS_enable_async_fast_gc) {
+        return std::unique_ptr<InterpreterCoreGarbageCollector>(
+            new InterpreterCoreAsyncFastGarbageCollector());
+      } else {
+        return std::unique_ptr<InterpreterCoreGarbageCollector>(
+            new InterpreterCoreFastGarbageCollector());
+      }
     } else {
       return std::unique_ptr<InterpreterCoreGarbageCollector>(
           new InterpreterCoreEventGarbageCollector(vec_instruction));

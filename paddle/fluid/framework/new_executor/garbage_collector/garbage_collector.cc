@@ -14,7 +14,6 @@
 
 #include "paddle/fluid/framework/new_executor/garbage_collector/garbage_collector.h"
 #include "paddle/fluid/framework/garbage_collector.h"
-#include "paddle/fluid/framework/new_executor/garbage_collector/async_fast_garbage_collector.h"
 #include "paddle/fluid/framework/new_executor/garbage_collector/event_garbage_collector.h"
 #include "paddle/fluid/framework/new_executor/garbage_collector/fast_garbage_collector.h"
 #include "paddle/fluid/framework/new_executor/garbage_collector/no_event_garbage_collector.h"

@@ -203,6 +203,7 @@ class PirInterpreter : public InterpreterBaseImpl {
   std::vector<std::shared_ptr<interpreter::VarRefInfo>> refs_;
 
   // used for Trace
+  bool use_trace_run_{false};
   int64_t sync_op_num_{-1};
   int64_t nccl_op_num_{-1};
   int64_t onednn_op_num_{-1};

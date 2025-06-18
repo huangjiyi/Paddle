@@ -1312,7 +1312,7 @@ void PirInterpreter::CheckGC(InstructionBase* instr) {
     gc_vars.push_back(var);
   }
 
-  if (async_gc_) {
+  if (use_trace_run_ && FLAGS_enable_async_fast_gc) {
     async_gc_->Add(gc_vars);
   } else {
     for (const auto& var : gc_vars) {
@@ -1515,7 +1515,7 @@ paddle::framework::FetchList PirInterpreter::Run(
     PreAnalysis();
     VLOG(4) << "Done PreAnalysis";
 
-    if (UseTraceRun(execution_config_, onednn_op_num_, sync_op_num_)) {
+    if (use_trace_run_) {
       LOG_FIRST_N(INFO, 1) << "pir interpreter is running by trace mode ...";
       TraceRunImpl();
     } else {
@@ -1527,7 +1527,7 @@ paddle::framework::FetchList PirInterpreter::Run(
     is_build_ = true;
     is_shared_results_build_ = true;
   } else {
-    if (UseTraceRun(execution_config_, onednn_op_num_, sync_op_num_)) {
+    if (use_trace_run_) {
       TraceRunImpl();
     } else {
       MultiThreadRunImpl();
@@ -1593,7 +1593,7 @@ FetchList PirInterpreter::Run(const std::vector<std::string>& feed_names,
     VLOG(4) << "Done PreAnalysis";
 
     // Run
-    if (UseTraceRun(execution_config_, onednn_op_num_, sync_op_num_)) {
+    if (use_trace_run_) {
       LOG_FIRST_N(INFO, 1) << "pir interpreter is running by trace mode ...";
       TraceRunImpl();
     } else {
@@ -1605,7 +1605,7 @@ FetchList PirInterpreter::Run(const std::vector<std::string>& feed_names,
     is_build_ = true;
     is_shared_results_build_ = true;
   } else {
-    if (UseTraceRun(execution_config_, onednn_op_num_, sync_op_num_)) {
+    if (use_trace_run_) {
       TraceRunImpl();
     } else {
       MultiThreadRunImpl();
@@ -1634,14 +1634,13 @@ FetchList PirInterpreter::Run(const std::vector<std::string>& feed_names,
 
 void PirInterpreter::TraceRunImpl() {
   // lazy initialization of gc, do not create gc is the program only run once
+  if (!gc_) {
+    gc_ = CreateInterpreterCoreGarbageCollector(place_, vec_instruction_base_);
+  }
+
   if (FLAGS_enable_async_fast_gc) {
-    if (!async_gc_)
-      async_gc_ = std::make_unique<InterpreterCoreAsyncFastGarbageCollector>(
-          vec_instruction_base_.size());
-  } else {
-    if (!gc_)
-      gc_ =
-          CreateInterpreterCoreGarbageCollector(place_, vec_instruction_base_);
+    async_gc_ = std::make_unique<InterpreterCoreAsyncFastGarbageCollector>(
+        vec_instruction_base_.size());
   }
 
   interpreter::ResetAtomicGuard guard(&deps_, &refs_);
@@ -2056,6 +2055,8 @@ void PirInterpreter::PreAnalysis() {
 
   UpdateOneDNNOpNum();
   VLOG(4) << "Done UpdateOneDNNOpNum";
+
+  use_trace_run_ = UseTraceRun(execution_config_, onednn_op_num_, sync_op_num_);
 }
 
 ::pir::Value PirInterpreter::GetValueByName(const std::string& var_name) {

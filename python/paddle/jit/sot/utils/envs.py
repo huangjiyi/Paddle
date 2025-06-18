@@ -143,6 +143,9 @@ ENV_ENABLE_SOT_STEP_PROFILER = BooleanEnvironmentVariable(
 ENV_SOT_BREAK_GRAPH_ON_GET_SYMBOLIC_VALUE = BooleanEnvironmentVariable(
     "SOT_BREAK_GRAPH_ON_GET_SYMBOLIC_VALUE", False
 )
+ENV_SOT_ENABLE_0_SIZE_FALLBACK = BooleanEnvironmentVariable(
+    "SOT_ENABLE_0_SIZE_FALLBACK", False
+)
 ENV_SOT_COLLECT_INFO = PEP508LikeEnvironmentVariable("SOT_COLLECT_INFO", {})
 ENV_SOT_SERIALIZE_INFO = BooleanEnvironmentVariable("SOT_SERIALIZE_INFO", False)
 ENV_SOT_CE_DEBUG_MODE = BooleanEnvironmentVariable("SOT_CE_DEBUG_MODE", False)

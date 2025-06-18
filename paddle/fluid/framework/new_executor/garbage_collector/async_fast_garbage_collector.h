@@ -18,19 +18,36 @@
 namespace paddle {
 namespace framework {
 
-class SingleThreadLockFreeWorker;
-
-class InterpreterCoreAsyncFastGarbageCollector
-    : public InterpreterCoreGarbageCollector {
+class SingleThreadLockFreeWorker {
  public:
-  InterpreterCoreAsyncFastGarbageCollector();
+  using Task = std::function<void()>;
 
-  void Add(Variable* var, const Instruction& instr) override;
-  void Add(Variable* var, const InstructionBase* instr) override;
+  SingleThreadLockFreeWorker(int capacity);
+
+  ~SingleThreadLockFreeWorker() { Wait(); }
+
+  void AddTask(Task task);
+
+  void Wait();
 
  private:
-  void Add(Variable* var);
+  void WorkerLoop();
 
+  const int capacity_;
+  std::thread worker_;
+  std::vector<Task> tasks_queue_;
+  std::atomic<int> head_;
+  std::atomic<int> tail_;
+  std::atomic<bool> running_;
+};
+
+class InterpreterCoreAsyncFastGarbageCollector {
+ public:
+  InterpreterCoreAsyncFastGarbageCollector(int num_instructions);
+
+  void Add(const std::vector<Variable*>& vars);
+
+ private:
   std::unique_ptr<SingleThreadLockFreeWorker> async_worker_;
 };
 }  // namespace framework

@@ -19,67 +19,43 @@
 namespace paddle {
 namespace framework {
 
-class SingleThreadLockFreeWorker {
- public:
-  using Task = std::function<void()>;
+SingleThreadLockFreeWorker::SingleThreadLockFreeWorker(int capacity)
+    : capacity_(capacity), head_(0), tail_(0), running_(true) {
+  tasks_queue_.resize(capacity);
+  worker_ = std::thread([this]() { this->WorkerLoop(); });
+}
 
-  static constexpr int kChunkSize = 8192;
-
-  SingleThreadLockFreeWorker() : head_(0), tail_(0), running_(true) {
-    tasks_queue_.resize(kChunkSize);
-    worker_ = std::thread([this]() { this->WorkerLoop(); });
+void SingleThreadLockFreeWorker::AddTask(Task task) {
+  tasks_queue_[tail_] = task;
+  tail_++;
+  if (tail_ >= tasks_queue_.size()) {
+    tasks_queue_.resize(tasks_queue_.size() + capacity_);
   }
+}
 
-  ~SingleThreadLockFreeWorker() { Wait(); }
+void SingleThreadLockFreeWorker::Wait() {
+  running_ = false;
+  if (worker_.joinable()) worker_.join();
+}
 
-  void AddTask(Task task) {
-    tasks_queue_[tail_] = task;
-    tail_++;
-    if (tail_ >= tasks_queue_.size()) {
-      tasks_queue_.resize(tasks_queue_.size() + kChunkSize);
+void SingleThreadLockFreeWorker::WorkerLoop() {
+  while (true) {
+    if (head_ < tail_) {
+      Task task = tasks_queue_[head_];
+      task();
+      head_++;
+    } else if (head_ == tail_ && running_) {
+      std::this_thread::yield();
+    } else {
+      break;
     }
   }
-
-  void Wait() {
-    running_ = false;
-    if (worker_.joinable()) worker_.join();
-  }
-
- private:
-  void WorkerLoop() {
-    while (true) {
-      if (head_ < tail_) {
-        Task task = tasks_queue_[head_];
-        task();
-        head_++;
-      } else if (head_ == tail_ && running_) {
-        std::this_thread::yield();
-      } else {
-        break;
-      }
-    }
-  }
-
-  std::thread worker_;
-  std::vector<Task> tasks_queue_;
-  std::atomic<int> head_;
-  std::atomic<int> tail_;
-  std::atomic<bool> running_;
-};
+}
 
 InterpreterCoreAsyncFastGarbageCollector::
-    InterpreterCoreAsyncFastGarbageCollector() {
-  async_worker_ = std::make_unique<SingleThreadLockFreeWorker>();
-}
-
-void InterpreterCoreAsyncFastGarbageCollector::Add(Variable* var,
-                                                   const Instruction&) {
-  Add(var);
-}
-
-void InterpreterCoreAsyncFastGarbageCollector::Add(Variable* var,
-                                                   const InstructionBase*) {
-  Add(var);
+    InterpreterCoreAsyncFastGarbageCollector(int num_instructions) {
+  async_worker_ =
+      std::make_unique<SingleThreadLockFreeWorker>(num_instructions);
 }
 
 void FreeVariable(Variable* var) {
@@ -134,8 +110,13 @@ void FreeVariable(Variable* var) {
   }
 }
 
-void InterpreterCoreAsyncFastGarbageCollector::Add(Variable* var) {
-  async_worker_->AddTask([var]() { FreeVariable(var); });
+void InterpreterCoreAsyncFastGarbageCollector::Add(
+    const std::vector<Variable*>& vars) {
+  async_worker_->AddTask([vars]() {
+    for (const auto& var : vars) {
+      FreeVariable(var);
+    }
+  });
 }
 
 }  // namespace framework

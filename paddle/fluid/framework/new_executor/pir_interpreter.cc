@@ -48,6 +48,7 @@
 #ifdef PADDLE_WITH_CUSTOM_DEVICE
 #include "paddle/fluid/framework/new_executor/instruction/custom_engine_instruction.h"
 #endif
+#include "paddle/fluid/framework/new_executor/garbage_collector/async_fast_garbage_collector.h"
 #include "paddle/fluid/framework/new_executor/instruction/builtin_combine_instruction.h"
 #include "paddle/fluid/framework/new_executor/instruction/control_flow/assert_instruction.h"
 #include "paddle/fluid/framework/new_executor/instruction/control_flow/has_elements_instruction.h"
@@ -90,6 +91,7 @@ COMMON_DECLARE_bool(enable_pir_in_executor_trace_run);
 COMMON_DECLARE_bool(enable_collect_shape);
 COMMON_DECLARE_int32(low_precision_op_list);
 COMMON_DECLARE_bool(pir_interpreter_record_stream_for_gc_cache);
+COMMON_DECLARE_bool(enable_async_fast_gc);
 
 #define CREATE_INSTR(instr_name)                                   \
   vec_instruction_base_.emplace_back(std::make_unique<instr_name>( \
@@ -142,6 +144,7 @@ PirInterpreter::PirInterpreter(const phi::Place& place,
       exception_notifier_(nullptr),
       completion_notifier_(nullptr),
       gc_(nullptr),
+      async_gc_{nullptr},
       last_live_ops_(),
       dependency_count_(nullptr),
       deps_(),
@@ -233,6 +236,7 @@ PirInterpreter::PirInterpreter(
       exception_notifier_(nullptr),
       completion_notifier_(nullptr),
       gc_(nullptr),
+      async_gc_{nullptr},
       last_live_ops_(),
       dependency_count_(nullptr),
       deps_(),
@@ -300,6 +304,7 @@ PirInterpreter::PirInterpreter(
 PirInterpreter::~PirInterpreter() {
   // cancel gc's thread
   gc_.reset(nullptr);
+  async_gc_.reset(nullptr);
   async_work_queue_.reset();
   VLOG(4) << "~PirInterpreter(): " << this << " on " << place_;
 
@@ -1283,6 +1288,7 @@ void PirInterpreter::CheckGC(InstructionBase* instr) {
   RecordStreamForGC(instr);
 #endif
 
+  std::vector<Variable*> gc_vars;
   for (auto var_id : instr->GCCheckVars()) {
     VLOG(4) << "GC:" << value_exe_info_->GetNameById(static_cast<int>(var_id))
             << ", id:" << var_id << ", ref:" << refs_[var_id]->DynamicRef();
@@ -1298,12 +1304,20 @@ void PirInterpreter::CheckGC(InstructionBase* instr) {
     if (is_ready) {
       VLOG(6) << "Async delete variable with name : "
               << value_exe_info_->GetNameById(static_cast<int>(var_id));
-      gc_->Add(refs_[var_id]->Var(), instr);
+      gc_vars.push_back(refs_[var_id]->Var());
     }
   }
 
   for (auto var : instr->EagerGCVars()) {
-    gc_->Add(var, instr);
+    gc_vars.push_back(var);
+  }
+
+  if (async_gc_) {
+    async_gc_->Add(gc_vars);
+  } else {
+    for (const auto& var : gc_vars) {
+      gc_->Add(var, instr);
+    }
   }
   instr->ClearEagerGCVars();
 }
@@ -1620,8 +1634,14 @@ FetchList PirInterpreter::Run(const std::vector<std::string>& feed_names,
 
 void PirInterpreter::TraceRunImpl() {
   // lazy initialization of gc, do not create gc is the program only run once
-  if (!gc_) {
-    gc_ = CreateInterpreterCoreGarbageCollector(place_, vec_instruction_base_);
+  if (FLAGS_enable_async_fast_gc) {
+    if (!async_gc_)
+      async_gc_ = std::make_unique<InterpreterCoreAsyncFastGarbageCollector>(
+          vec_instruction_base_.size());
+  } else {
+    if (!gc_)
+      gc_ =
+          CreateInterpreterCoreGarbageCollector(place_, vec_instruction_base_);
   }
 
   interpreter::ResetAtomicGuard guard(&deps_, &refs_);

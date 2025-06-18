@@ -29,6 +29,7 @@ class Block;
 namespace paddle {
 namespace framework {
 class ValueExecutionInfo;
+class InterpreterCoreAsyncFastGarbageCollector;
 class PirInterpreter : public InterpreterBaseImpl {
   using ExecutionConfig = interpreter::ExecutionConfig;
   using InstructionSchedulingPriorityLess = std::function<bool(size_t, size_t)>;
@@ -188,6 +189,7 @@ class PirInterpreter : public InterpreterBaseImpl {
   std::shared_ptr<EventsWaiter::EventNotifier> completion_notifier_{nullptr};
 
   std::unique_ptr<InterpreterCoreGarbageCollector> gc_;
+  std::unique_ptr<InterpreterCoreAsyncFastGarbageCollector> async_gc_;
 
   // last_live_ops_[i] contains the id of operators that last access the i-th
   // var
